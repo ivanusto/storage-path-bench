@@ -148,16 +148,24 @@ def read_all(paths, block):
     return n
 
 
-def mmap_touch(paths):
-    """Touch one byte per page, the way a GGUF loader pulls weights in."""
+ADVICE = {"none": None, "sequential": "MADV_SEQUENTIAL", "willneed": "MADV_WILLNEED"}
+
+
+def mmap_touch(paths, advise="none"):
+    """Touch one byte per page, the way a GGUF loader pulls weights in.
+    advise asks the kernel for sequential readahead or an up-front read of the
+    whole mapping before the first touch, which some loaders do and some do not."""
     n = 0
     page = mmap.PAGESIZE
+    flag = getattr(mmap, ADVICE[advise], None) if ADVICE[advise] else None
     for p in paths:
         size = os.path.getsize(p)
         if size == 0:
             continue
         with open(p, "rb") as f:
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                if flag is not None:
+                    m.madvise(flag)
                 s = 0
                 for off in range(0, size, page):
                     s += m[off]
@@ -176,11 +184,11 @@ def cmd_run(a):
         cache = drop_caches(paths) if a.drop_caches else "kept"
         load1 = os.getloadavg()[0]
         t0 = time.monotonic()
-        n = mmap_touch(paths) if a.mode == "mmap" else read_all(paths, a.block_mb * 1024 * 1024)
+        n = mmap_touch(paths, a.advise) if a.mode == "mmap" else read_all(paths, a.block_mb * 1024 * 1024)
         secs = time.monotonic() - t0
         row = {
             "t": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "label": a.label, "round": r, "mode": a.mode, "path": a.path,
+            "label": a.label, "round": r, "mode": a.mode, "advise": a.advise if a.mode == "mmap" else None, "path": a.path,
             "files": len(paths), "bytes": n, "gib": round(n / GIB, 2),
             "seconds": round(secs, 2), "gib_per_s": round(n / GIB / secs, 3) if secs else None,
             "client_cache": cache, "server_cache": "unknown (not controllable from the client)",
@@ -231,6 +239,7 @@ def main():
     p.add_argument("--path", required=True); p.add_argument("--label", required=True)
     p.add_argument("--rounds", type=int, default=3); p.add_argument("--mode", choices=["read", "mmap"], default="read")
     p.add_argument("--block-mb", type=int, default=8); p.add_argument("--drop-caches", action="store_true")
+    p.add_argument("--advise", choices=list(ADVICE), default="none", help="madvise hint for --mode mmap")
     p.add_argument("--pause", type=float, default=5.0, help="seconds between rounds")
     p.add_argument("--out", default="results.jsonl"); p.add_argument("--note")
     p.set_defaults(fn=cmd_run)
